@@ -112,7 +112,7 @@ pub fn socket(domain: u32, socket_type: u32, protocol: u32) !socket_t {
     }
 }
 
-fn setSockFlags(sock: socket_t, flags: u32) !void {
+pub fn setSockFlags(sock: socket_t, flags: u32) !void {
     if ((flags & CLOEXEC) != 0) {
         if (native_os == .windows) {
             // Windows: disable handle inheritance. This prevents child
