@@ -7,6 +7,15 @@ pub fn build(b: *std.Build) !void {
     const dep_opts = .{ .target = target, .optimize = optimize };
     const metrics_module = b.dependency("metrics", dep_opts).module("metrics");
     const websocket_module = b.dependency("websocket", dep_opts).module("websocket");
+    {
+        // Replace websocket's default `build` options with content that cannot
+        // hash-collide with another websocket package's identical options file
+        // when both appear in one compile (ziglang/zig#31613).
+        const options = b.addOptions();
+        options.addOption(bool, "websocket_blocking", false);
+        options.addOption(bool, "httpz_websocket_options", true);
+        websocket_module.addOptions("build", options);
+    }
 
     const enable_tsan = b.option(bool, "tsan", "Enable ThreadSanitizer");
 

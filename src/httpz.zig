@@ -263,6 +263,8 @@ pub fn Server(comptime H: type) type {
         _workers: []Worker,
         _cond: Io.Condition,
         _listener: ?posix.fd_t,
+        // False when listen_fd was supplied: caller owns the fd and we must not close it.
+        _owns_listener: bool,
         _max_request_per_connection: usize,
         _middlewares: []const Middleware(H),
         _websocket_state: websocket.server.WorkerState,
@@ -321,6 +323,7 @@ pub fn Server(comptime H: type) type {
                 ._cond = .init,
                 ._workers = workers,
                 ._listener = null,
+                ._owns_listener = true,
                 ._middlewares = &.{},
                 ._middleware_registry = .{},
                 ._websocket_state = websocket_state,
@@ -353,10 +356,23 @@ pub fn Server(comptime H: type) type {
             errdefer self._mut.unlock(io);
 
             const config = self.config;
+            const inherited = config.listen_fd;
+            const owns_listener = inherited == null;
+            self._owns_listener = owns_listener;
+
             const address = try config.address.toPosix(io);
             const is_unix_socket = address.any.family == posix.AF.UNIX;
 
             const listener = blk: {
+                if (inherited) |fd| {
+                    // Caller already bound/listened; set CLOEXEC and nonblocking to match
+                    // sockets we create ourselves.
+                    var sock_flags: u32 = posix.CLOEXEC;
+                    if (blockingMode() == false) sock_flags |= posix.NONBLOCK;
+                    try posix.setSockFlags(fd, sock_flags);
+                    break :blk fd;
+                }
+
                 var sock_flags: u32 = posix.SOCK.STREAM | posix.CLOEXEC;
                 if (blockingMode() == false) sock_flags |= posix.NONBLOCK;
 
@@ -365,28 +381,30 @@ pub fn Server(comptime H: type) type {
             };
 
             errdefer {
-                posix.close(listener);
+                if (owns_listener) posix.close(listener);
                 self._listener = null;
             }
 
-            if (is_unix_socket == false) {
-                try posix.setsockopt(listener, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
-            }
-
-            try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
-
-            if (is_unix_socket == false and self._workers.len > 1) {
-                if (@hasDecl(posix.SO, "REUSEPORT_LB")) {
-                    try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEPORT_LB, &std.mem.toBytes(@as(c_int, 1)));
-                } else if (@hasDecl(posix.SO, "REUSEPORT")) {
-                    try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEPORT, &std.mem.toBytes(@as(c_int, 1)));
+            if (inherited == null) {
+                if (is_unix_socket == false) {
+                    try posix.setsockopt(listener, posix.IPPROTO.TCP, posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1)));
                 }
-            }
 
-            {
-                const socklen = address.getOsSockLen();
-                try posix.bind(listener, &address.any, socklen);
-                try posix.listen(listener, 1024); // kernel backlog
+                try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEADDR, &std.mem.toBytes(@as(c_int, 1)));
+
+                if (is_unix_socket == false and self._workers.len > 1) {
+                    if (@hasDecl(posix.SO, "REUSEPORT_LB")) {
+                        try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEPORT_LB, &std.mem.toBytes(@as(c_int, 1)));
+                    } else if (@hasDecl(posix.SO, "REUSEPORT")) {
+                        try posix.setsockopt(listener, posix.SOL.SOCKET, posix.SO.REUSEPORT, &std.mem.toBytes(@as(c_int, 1)));
+                    }
+                }
+
+                {
+                    const socklen = address.getOsSockLen();
+                    try posix.bind(listener, &address.any, socklen);
+                    try posix.listen(listener, 1024); // kernel backlog
+                }
             }
 
             self._listener = listener;
@@ -443,7 +461,8 @@ pub fn Server(comptime H: type) type {
 
                 // Closed here rather than in stop(): until its thread exits, a
                 // worker can still re-arm the listener in its event loop.
-                posix.close(listener);
+                // Inherited listen_fd stays open; the caller owns it.
+                if (owns_listener) posix.close(listener);
             }
         }
 
@@ -479,11 +498,11 @@ pub fn Server(comptime H: type) type {
                     // (which might not be that necessary since, on Linux,
                     // NonBlocking should be used)
                     posix.shutdown(l, .recv) catch {};
-                    posix.close(l);
+                    if (self._owns_listener) posix.close(l);
                 }
             }
             // In nonblocking mode, listen() closes the listener once its
-            // workers have exited.
+            // workers have exited (when _owns_listener).
         }
 
         pub fn router(self: *Self, config: RouterConfig) !*Router(H, ActionArg) {

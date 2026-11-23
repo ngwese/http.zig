@@ -525,6 +525,9 @@ pub const Request = struct {
             const self: *Reader = @alignCast(@fieldParentPtr("interface", io_r));
             const buf = limit.slice(try w.writableSliceGreedy(1));
             const n = self.read(buf) catch return error.ReadFailed;
+            // Zero means EOF. Returning 0 makes Io.Reader.readSliceShort busy-loop
+            // (ShortError does not include EndOfStream; callers treat EndOfStream as short read).
+            if (n == 0) return error.EndOfStream;
             w.advance(n);
             return n;
         }

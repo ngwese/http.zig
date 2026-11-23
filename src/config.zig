@@ -9,6 +9,10 @@ const Io = std.Io;
 
 pub const Config = struct {
     address: Address = .localhost(5882),
+    /// When set, `Server.listen` uses this already-bound listening socket
+    /// instead of creating, binding, and listening on `address`. The caller
+    /// retains ownership: httpz will not close this fd on stop/listen exit.
+    listen_fd: ?posix.fd_t = null,
     workers: Worker = .{},
     request: Request = .{},
     response: Response = .{},
